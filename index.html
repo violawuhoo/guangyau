@@ -349,23 +349,21 @@ body {
         <div class="rw"></div><div class="rw"></div><div class="rw"></div><div class="rw"></div>
       </div>
       <div class="rec-timer" id="recTimer">0:00</div>
-      <div class="rec-tip">松开发送 · 最长 30 秒</div>
+      <div class="rec-tip">再次点击发送 · 最长 30 秒</div>
     </div>
     <div class="overlay" id="fr-overlay">
       <div class="fr-circle">🌟</div>
       <div class="fr-label">跟读模式 ✨</div>
       <div class="fr-word"   id="frWord">好攰</div>
       <div class="fr-pinyin" id="frPinyin">hou2 gwai6</div>
-      <div class="fr-tip">松开完成跟读</div>
+      <div class="fr-tip">点击完成跟读</div>
     </div>
 
     <div class="input-area">
-      <div class="hint" id="hint">按住说话 🎙️</div>
+      <div class="hint" id="hint">点击开始说话 🎙️</div>
       <div class="controls">
         <div class="side-btn" id="ttsBtn" onclick="toggleTTS()" title="语音开关">🔊</div>
-        <button class="btn-rec" id="btnRec"
-          onmousedown="startRec()" onmouseup="stopRec()"
-          ontouchstart="startRec(event)" ontouchend="stopRec(event)">🎙️</button>
+        <button class="btn-rec" id="btnRec" onclick="toggleRec()">🎙️</button>
         <div class="side-btn" onclick="clearChat()" title="清空对话">🗑️</div>
       </div>
     </div>
@@ -553,95 +551,86 @@ async function volcSTT(audioBlob) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// RECORDING — MediaRecorder + 火山引擎 STT
+// RECORDING — 点击开始/停止，Web Speech API 识别
 // ══════════════════════════════════════════════════════════════
-function startRec(e) {
-  if (e) e.preventDefault();
+function toggleRec() {
   if (isProcessing) return;
-  if (waitFollowRead) { startFollowRec(); return; }
-  if (isRecording) return;
-
-  isRecording = true;
-  audioChunks = [];
-  const btn = document.getElementById('btnRec');
-  btn.classList.add('rec'); btn.textContent = '🔴';
-  setHint('rec', '松开发送 🔴');
-  document.getElementById('rec-overlay').classList.add('show');
-
-  recSeconds = 0;
-  document.getElementById('recTimer').textContent = '0:00';
-  recInterval = setInterval(() => {
-    recSeconds++;
-    const m = Math.floor(recSeconds/60), s = recSeconds%60;
-    document.getElementById('recTimer').textContent = `${m}:${s.toString().padStart(2,'0')}`;
-    if (recSeconds >= 30) stopRec();
-  }, 1000);
-
-  // 启动 MediaRecorder
-  navigator.mediaDevices.getUserMedia({ audio: true, video: false })
-    .then(stream => {
-      mediaRecorder = new MediaRecorder(stream);
-      mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
-      mediaRecorder.start(100);
-    })
-    .catch(err => {
-      console.warn('麦克风权限拒绝:', err);
-      stopRec();
-      showErr('请允许麦克风权限后重试');
-    });
+  if (waitFollowRead) {
+    if (isFollowRead) { stopFollowRec(); } else { startFollowRec(); }
+    return;
+  }
+  if (isRecording) { stopRec(); } else { startRec(); }
 }
 
-async function stopRec(e) {
-  if (e) e.preventDefault();
-  if (waitFollowRead) { stopFollowRec(); return; }
-  if (!isRecording) return;
+function startRec() {
+  if (isProcessing || isRecording) return;
 
+  // 优先用 Web Speech API（HTTPS 下完全可用，粤语识别好）
+  if (recognition) {
+    isRecording = true;
+    audioChunks = [];
+    const btn = document.getElementById('btnRec');
+    btn.classList.add('rec'); btn.textContent = '🔴';
+    setHint('rec', '再次点击发送 🔴');
+    document.getElementById('rec-overlay').classList.add('show');
+
+    recSeconds = 0;
+    document.getElementById('recTimer').textContent = '0:00';
+    recInterval = setInterval(() => {
+      recSeconds++;
+      const m = Math.floor(recSeconds/60), s = recSeconds%60;
+      document.getElementById('recTimer').textContent = `${m}:${s.toString().padStart(2,'0')}`;
+      if (recSeconds >= 30) stopRec();
+    }, 1000);
+
+    recognition.onresult = (event) => {
+      const transcript = event.results[0]?.[0]?.transcript || '';
+      if (transcript) {
+        cleanupRec();
+        processUserInput(transcript);
+      }
+    };
+    recognition.onerror = (e) => {
+      console.warn('STT 错误:', e.error);
+      cleanupRec();
+      if (e.error === 'not-allowed') {
+        showErr('请在浏览器设置里允许麦克风权限');
+      } else {
+        fallbackTextInput();
+      }
+    };
+    recognition.onend = () => {
+      // 如果还在录音状态说明没有识别结果
+      if (isRecording) { cleanupRec(); fallbackTextInput(); }
+    };
+    try {
+      recognition.start();
+    } catch(e) {
+      cleanupRec();
+      fallbackTextInput();
+    }
+  } else {
+    fallbackTextInput();
+  }
+}
+
+function stopRec() {
+  if (!isRecording) return;
+  // 停止 Web Speech API 录音，触发 onresult 回调
+  if (recognition) {
+    try { recognition.stop(); } catch(e) {}
+  }
+  cleanupRec();
+}
+
+function cleanupRec() {
   isRecording = false;
   clearInterval(recInterval);
   const btn = document.getElementById('btnRec');
   btn.classList.remove('rec'); btn.textContent = '🎙️';
-  setHint('', '按住说话 🎙️');
+  setHint('', '点击开始说话 🎙️');
   document.getElementById('rec-overlay').classList.remove('show');
-
-  // 停止录音
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stop();
-    mediaRecorder.stream.getTracks().forEach(t => t.stop());
-
-    mediaRecorder.onstop = async () => {
-      const blob = new Blob(audioChunks, { type: 'audio/wav' });
-
-      if (WORKER_URL) {
-        // 用火山引擎 STT
-        setStatus('识别中...');
-        const result = await volcSTT(blob);
-        setStatus('练习中');
-        if (result && result.transcript) {
-          processUserInput(result.transcript);
-        } else {
-          // 降级到文字输入
-          fallbackTextInput();
-        }
-      } else {
-        // 没有 Worker，用浏览器 STT
-        useBrowserSTT();
-      }
-    };
-  } else {
-    useBrowserSTT();
-  }
-}
-
-function useBrowserSTT() {
-  if (!recognition) { fallbackTextInput(); return; }
-  recognition.onresult = (event) => {
-    const transcript = event.results[0]?.[0]?.transcript || '';
-    if (transcript) processUserInput(transcript);
-    else fallbackTextInput();
-  };
-  recognition.onerror = () => fallbackTextInput();
-  recognition.onnomatch = () => fallbackTextInput();
-  try { recognition.start(); } catch(e) { fallbackTextInput(); }
+  // Web Speech API 会通过 onresult 回调返回结果，这里只做 UI 清理
 }
 
 function fallbackTextInput() {
@@ -659,7 +648,7 @@ function enterFollowReadMode(word, pinyin) {
   document.getElementById('frWord').textContent   = word;
   document.getElementById('frPinyin').textContent = pinyin;
   document.getElementById('btnRec').classList.add('fr');
-  setHint('fr', '按住跟读 🌟');
+  setHint('fr', '点击跟读 🌟');
   // 先播放示范
   speakWord(word);
 }
@@ -712,7 +701,7 @@ function evaluateFollowRead(transcript, confidence) {
 function completeFollowRead(msg) {
   waitFollowRead = false;
   document.getElementById('btnRec').classList.remove('fr');
-  setHint('', '按住说话 🎙️');
+  setHint('', '点击开始说话 🎙️');
   addFollowSuccess(msg);
   setTimeout(() => {
     addBubble('ai', msg);
